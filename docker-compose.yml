@@ -1,0 +1,20 @@
+version: "3.9"
+
+services:
+  keyvault-backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: keyvault-ai-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - KEYVAULT_DATABASE_URL=sqlite:///./keyvault.db
+      - KEYVAULT_AES256_SECRET=KeyVaultAI-2026-UltraSecure-AES256-MasterKey-32Bytes!
+      - KEYVAULT_JWT_SECRET=KeyVaultAI-JWT-HS256-Signing-Secret-Key-2026-Autonomous
+    volumes:
+      - keyvault_sqlite_data:/app/data
+    restart: unless-stopped
+
+volumes:
+  keyvault_sqlite_data:
