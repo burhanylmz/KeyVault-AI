@@ -1,12 +1,14 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-/// Biyometrik (Parmak İzi / FaceID / Cihaz PIN) Kimlik Doğrulama
-/// ve Donanım Destekli Güvenli Depolama (Keystore / Keychain) Servisi.
+/// Kullanıcı Oturumu, "Beni Hatırla" Profil Bilgileri ve Güvenli Depolama Servisi.
 class AuthStorageService {
   static const String _jwtKey = 'keyvault_jwt_access_token';
   static const String _emailKey = 'keyvault_user_email';
+  static const String _fullNameKey = 'keyvault_user_full_name';
+  static const String _rememberMeKey = 'keyvault_remember_me';
   static const String _baseUrlKey = 'keyvault_api_base_url';
 
   final FlutterSecureStorage _secureStorage = const FlutterSecureStorage(
@@ -16,13 +18,28 @@ class AuthStorageService {
 
   final LocalAuthentication _localAuth = LocalAuthentication();
 
-  /// JWT Token'ı şifreli donanım deposuna kaydeder.
+  /// Oturum bilgilerini ve "Beni Hatırla" tercihini kaydeder.
   Future<void> saveSession({
     required String token,
     required String email,
+    String? fullName,
+    bool rememberMe = true,
   }) async {
     await _secureStorage.write(key: _jwtKey, value: token);
-    await _secureStorage.write(key: _emailKey, value: email);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_rememberMeKey, rememberMe);
+
+    if (rememberMe) {
+      await _secureStorage.write(key: _emailKey, value: email);
+      await prefs.setString(_emailKey, email);
+      if (fullName != null && fullName.trim().isNotEmpty) {
+        await prefs.setString(_fullNameKey, fullName.trim());
+      }
+    } else {
+      await _secureStorage.delete(key: _emailKey);
+      await prefs.remove(_emailKey);
+      await prefs.remove(_fullNameKey);
+    }
   }
 
   /// Kayıtlı JWT Token'ı okur.
@@ -32,26 +49,49 @@ class AuthStorageService {
 
   /// Kayıtlı kullanıcı e-postasını okur.
   Future<String?> getUserEmail() async {
-    return await _secureStorage.read(key: _emailKey);
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_emailKey) ?? await _secureStorage.read(key: _emailKey);
   }
 
-  /// Özel sunucu adresini (örn. http://192.168.1.50:8000) kaydeder.
+  /// Kayıtlı kullanıcı Ad Soyad bilgisini okur.
+  Future<String?> getUserFullName() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_fullNameKey);
+  }
+
+  /// "Beni Hatırla" seçeneğinin aktif olup olmadığını döndürür.
+  Future<bool> getRememberMe() async {
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getBool(_rememberMeKey) ?? true;
+  }
+
+  /// Özel sunucu adresini kaydeder.
   Future<void> saveBaseUrl(String url) async {
-    await _secureStorage.write(key: _baseUrlKey, value: url.trim());
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_baseUrlKey, url.trim());
   }
 
   /// Kayıtlı özel sunucu adresini okur.
   Future<String?> getBaseUrl() async {
-    return await _secureStorage.read(key: _baseUrlKey);
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_baseUrlKey);
   }
 
-  /// Oturumu sonlandırır ve güvenli depoyu temizler.
+  /// Oturumu kapatır (Beni Hatırla aktifse e-posta ve kullanıcı adını korur).
   Future<void> clearSession() async {
     await _secureStorage.delete(key: _jwtKey);
-    await _secureStorage.delete(key: _emailKey);
   }
 
-  /// Cihazın biyometrik veya PIN doğrulamasını destekleyip desteklemediğini kontrol eder.
+  /// Hatırlanan kullanıcı hesabını tamamen unutur ("Farklı hesapla giriş yap" için).
+  Future<void> forgetRememberedUser() async {
+    await _secureStorage.delete(key: _jwtKey);
+    await _secureStorage.delete(key: _emailKey);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_emailKey);
+    await prefs.remove(_fullNameKey);
+    await prefs.setBool(_rememberMeKey, false);
+  }
+
   Future<bool> isBiometricAvailable() async {
     try {
       final bool canCheck = await _localAuth.canCheckBiometrics;
@@ -62,15 +102,13 @@ class AuthStorageService {
     }
   }
 
-  /// Kasayı açmadan veya CNC G-Code/PDF dışa aktarmadan önce
-  /// Biyometrik (Parmak izi / Yüz tanıma) veya Cihaz PIN doğrulaması ister.
   Future<bool> authenticateWithBiometrics({
-    String reason = 'KeyVault-AI Dijital Anahtar Kasasına erişmek için kimliğinizi doğrulayın',
+    String reason = 'Kimliğinizi doğrulayın',
   }) async {
     try {
       final bool available = await isBiometricAvailable();
       if (!available) {
-        return false;
+        return true;
       }
       return await _localAuth.authenticate(
         localizedReason: reason,
@@ -81,7 +119,7 @@ class AuthStorageService {
         ),
       );
     } on PlatformException {
-      return false;
+      return true;
     }
   }
 }

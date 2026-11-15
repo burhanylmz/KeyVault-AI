@@ -3,7 +3,7 @@ import '../services/api_service.dart';
 import '../services/auth_storage.dart';
 import 'home_screen.dart';
 
-/// Biyometrik / PIN Kilit ve Giriş/Kayıt Ekranı
+/// Profesyonel "Beni Hatırla" ve "Hoş Geldin, [Kullanıcı Adı]" Destekli Giriş/Kayıt Ekranı
 class LoginLockScreen extends StatefulWidget {
   final ApiService apiService;
   final AuthStorageService authStorage;
@@ -25,64 +25,87 @@ class _LoginLockScreenState extends State<LoginLockScreen> {
 
   bool _isRegisterMode = false;
   bool _isLoading = false;
-  bool _hasSavedToken = false;
+  bool _rememberMe = true;
+  bool _isRememberedUserMode = false;
+  String? _rememberedName;
+  String? _rememberedEmail;
   String? _errorMessage;
 
   @override
   void initState() {
     super.initState();
-    _checkExistingSession();
+    _initScreen();
   }
 
-  Future<void> _checkExistingSession() async {
+  Future<void> _initScreen() async {
     await widget.apiService.loadSavedBaseUrl();
-    final token = await widget.authStorage.getToken();
     final savedEmail = await widget.authStorage.getUserEmail();
-    if (savedEmail != null) {
-      _emailController.text = savedEmail;
-    }
-    if (token != null && token.isNotEmpty) {
-      setState(() => _hasSavedToken = true);
-      await _unlockWithBiometrics();
+    final savedName = await widget.authStorage.getUserFullName();
+    final remember = await widget.authStorage.getRememberMe();
+
+    if (mounted) {
+      setState(() {
+        _rememberMe = remember;
+        if (remember && savedEmail != null && savedEmail.trim().isNotEmpty) {
+          _rememberedEmail = savedEmail.trim();
+          _emailController.text = _rememberedEmail!;
+          _rememberedName = (savedName != null && savedName.trim().isNotEmpty)
+              ? savedName.trim()
+              : savedEmail.split('@').first;
+          _isRememberedUserMode = true;
+        }
+      });
     }
   }
 
-  Future<void> _unlockWithBiometrics() async {
-    final authenticated = await widget.authStorage.authenticateWithBiometrics(
-      reason: 'Dijital Anahtar Kasanızı açmak için kimliğinizi doğrulayın',
-    );
-    if (authenticated && mounted) {
-      _navigateToHome();
-    } else if (mounted) {
+  Future<void> _switchAccount() async {
+    await widget.authStorage.forgetRememberedUser();
+    if (mounted) {
       setState(() {
-        _errorMessage = 'Biyometrik doğrulama tamamlanamadı. Parola ile giriş yapabilirsiniz.';
+        _isRememberedUserMode = false;
+        _rememberedName = null;
+        _rememberedEmail = null;
+        _emailController.clear();
+        _passwordController.clear();
+        _errorMessage = null;
       });
     }
   }
 
   Future<void> _submitAuthForm() async {
+    final email = _isRememberedUserMode
+        ? (_rememberedEmail ?? _emailController.text.trim())
+        : _emailController.text.trim();
+    final password = _passwordController.text;
+
+    if (email.isEmpty || password.isEmpty) {
+      setState(() {
+        _errorMessage = 'Lütfen parola alanını doldurun.';
+      });
+      return;
+    }
+
     setState(() {
       _isLoading = true;
       _errorMessage = null;
     });
 
     try {
-      final email = _emailController.text.trim();
-      final password = _passwordController.text;
-
-      if (_isRegisterMode) {
+      if (_isRegisterMode && !_isRememberedUserMode) {
         final fullName = _nameController.text.trim().isEmpty
-            ? 'KeyVault Kullanıcısı'
+            ? email.split('@').first
             : _nameController.text.trim();
         await widget.apiService.register(
           email: email,
           password: password,
           fullName: fullName,
+          rememberMe: _rememberMe,
         );
       } else {
         await widget.apiService.login(
           email: email,
           password: password,
+          rememberMe: _rememberMe,
         );
       }
 
@@ -113,39 +136,207 @@ class _LoginLockScreenState extends State<LoginLockScreen> {
     );
   }
 
-  Future<void> _showServerConfigDialog() async {
-    final controller = TextEditingController(text: widget.apiService.baseUrl);
-    await showDialog<void>(
+  Future<void> _showServerSwitcherSheet() async {
+    final formKey = GlobalKey<FormState>();
+    final String initialLanUrl =
+        widget.apiService.baseUrl == ApiService.defaultBaseUrl
+            ? ApiService.defaultLanBaseUrl
+            : widget.apiService.baseUrl;
+    final lanController = TextEditingController(text: initialLanUrl);
+
+    await showModalBottomSheet<void>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF1E293B),
-        title: const Text('Sunucu Bağlantısı'),
-        content: TextField(
-          controller: controller,
-          decoration: const InputDecoration(
-            labelText: 'Sunucu Adresi (örn. http://192.168.1.10:8000)',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: const Text('İptal'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              await widget.apiService.updateBaseUrl(controller.text);
-              if (mounted) {
-                setState(() {});
-                Navigator.of(ctx).pop();
-              }
-            },
-            child: const Text('Kaydet'),
-          ),
-        ],
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E293B),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
+      builder: (ctx) {
+        final bottomInset = MediaQuery.of(ctx).viewInsets.bottom;
+        final bool isLocalhost =
+            widget.apiService.baseUrl == ApiService.defaultBaseUrl;
+
+        return Padding(
+          padding: EdgeInsets.fromLTRB(20, 16, 20, 24 + bottomInset),
+          child: Form(
+            key: formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 42,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Sunucu Seçici',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                const Text(
+                  'Bağlanmak istediğiniz ortamı seçin veya yerel IP adresini girin.',
+                  style: TextStyle(fontSize: 13, color: Colors.white60),
+                ),
+                const SizedBox(height: 18),
+                Material(
+                  color: isLocalhost
+                      ? const Color(0xFF0EA5E9).withOpacity(0.16)
+                      : const Color(0xFF0F172A),
+                  borderRadius: BorderRadius.circular(16),
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(16),
+                    onTap: () async {
+                      await widget.apiService
+                          .updateBaseUrl(ApiService.defaultBaseUrl);
+                      if (mounted) setState(() {});
+                      if (ctx.mounted) Navigator.of(ctx).pop();
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.all(14),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: isLocalhost
+                              ? const Color(0xFF38BDF8)
+                              : Colors.white.withOpacity(0.08),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          const Text('💻', style: TextStyle(fontSize: 24)),
+                          const SizedBox(width: 14),
+                          const Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  'Chrome & USB Tablet (Localhost)',
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white,
+                                    fontSize: 15,
+                                  ),
+                                ),
+                                SizedBox(height: 2),
+                                Text(
+                                  ApiService.defaultBaseUrl,
+                                  style: TextStyle(
+                                    color: Colors.white60,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (isLocalhost)
+                            const Icon(
+                              Icons.check_circle_rounded,
+                              color: Color(0xFF38BDF8),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: !isLocalhost
+                        ? const Color(0xFF0EA5E9).withOpacity(0.10)
+                        : const Color(0xFF0F172A),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: !isLocalhost
+                          ? const Color(0xFF38BDF8)
+                          : Colors.white.withOpacity(0.08),
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Row(
+                        children: [
+                          Text('📱', style: TextStyle(fontSize: 22)),
+                          SizedBox(width: 10),
+                          Text(
+                            'Honor Tablet (Yerel Ağ)',
+                            style: TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                              fontSize: 15,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: lanController,
+                        keyboardType: TextInputType.url,
+                        decoration: InputDecoration(
+                          labelText: 'Bilgisayar IP Adresi',
+                          hintText: 'http://192.168.1.X:8000/api',
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          isDense: true,
+                        ),
+                        validator: (val) {
+                          if (val == null || val.trim().isEmpty) {
+                            return 'Lütfen geçerli bir sunucu adresi girin.';
+                          }
+                          if (!val.trim().startsWith('http://') &&
+                              !val.trim().startsWith('https://')) {
+                            return 'Adres http:// veya https:// ile başlamalıdır.';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        height: 44,
+                        child: FilledButton.icon(
+                          onPressed: () async {
+                            if (formKey.currentState?.validate() ?? false) {
+                              await widget.apiService
+                                  .updateBaseUrl(lanController.text);
+                              if (mounted) setState(() {});
+                              if (ctx.mounted) Navigator.of(ctx).pop();
+                            }
+                          },
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF0EA5E9),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          icon: const Icon(Icons.save_rounded, size: 18),
+                          label: const Text('Yerel Ağ Adresini Kaydet'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
-    controller.dispose();
+
+    lanController.dispose();
   }
 
   @override
@@ -184,32 +375,39 @@ class _LoginLockScreenState extends State<LoginLockScreen> {
                   Container(
                     padding: const EdgeInsets.all(16),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF38BDF8).withOpacity(0.12),
+                      color: const Color(0xFF38BDF8).withOpacity(0.14),
                       shape: BoxShape.circle,
                     ),
-                    child: const Icon(
-                      Icons.vpn_key_rounded,
-                      size: 46,
-                      color: Color(0xFF38BDF8),
+                    child: Icon(
+                      _isRememberedUserMode
+                          ? Icons.verified_user_rounded
+                          : Icons.vpn_key_rounded,
+                      size: 44,
+                      color: const Color(0xFF38BDF8),
                     ),
                   ),
                   const SizedBox(height: 16),
-                  const Text(
-                    'KeyVault',
-                    style: TextStyle(
-                      fontSize: 28,
+                  Text(
+                    _isRememberedUserMode
+                        ? 'Hoş Geldin, ${_rememberedName ?? ""}'
+                        : 'KeyVault',
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 25,
                       fontWeight: FontWeight.w800,
                       color: Colors.white,
                       letterSpacing: -0.5,
                     ),
                   ),
                   const SizedBox(height: 6),
-                  const Text(
-                    'Güvenli Dijital Anahtar Kasanız',
+                  Text(
+                    _isRememberedUserMode
+                        ? 'Devam etmek için yalnızca parolanızı girin'
+                        : 'Güvenli Dijital Anahtar Kasanız',
                     textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 14, color: Colors.white60),
+                    style: const TextStyle(fontSize: 13.5, color: Colors.white60),
                   ),
-                  const SizedBox(height: 26),
+                  const SizedBox(height: 24),
                   if (_errorMessage != null) ...[
                     Container(
                       width: double.infinity,
@@ -217,21 +415,43 @@ class _LoginLockScreenState extends State<LoginLockScreen> {
                       decoration: BoxDecoration(
                         color: Colors.redAccent.withOpacity(0.14),
                         borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.redAccent.withOpacity(0.5)),
+                        border: Border.all(
+                          color: Colors.redAccent.withOpacity(0.5),
+                        ),
                       ),
                       child: Text(
                         _errorMessage!,
-                        style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+                        style: const TextStyle(
+                          color: Colors.redAccent,
+                          fontSize: 13,
+                        ),
                       ),
                     ),
                     const SizedBox(height: 16),
                   ],
-                  if (_isRegisterMode) ...[
+
+                  // Hatırlanan Kullanıcı Değilse E-Posta ve Kayıt Alanlarını Göster
+                  if (!_isRememberedUserMode) ...[
+                    if (_isRegisterMode) ...[
+                      TextField(
+                        controller: _nameController,
+                        textCapitalization: TextCapitalization.words,
+                        decoration: InputDecoration(
+                          labelText: 'Ad Soyad',
+                          prefixIcon: const Icon(Icons.person_outline_rounded),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                    ],
                     TextField(
-                      controller: _nameController,
+                      controller: _emailController,
+                      keyboardType: TextInputType.emailAddress,
                       decoration: InputDecoration(
-                        labelText: 'Ad Soyad',
-                        prefixIcon: const Icon(Icons.person_outline_rounded),
+                        labelText: 'E-Posta Adresi',
+                        prefixIcon: const Icon(Icons.email_outlined),
                         border: OutlineInputBorder(
                           borderRadius: BorderRadius.circular(14),
                         ),
@@ -239,21 +459,12 @@ class _LoginLockScreenState extends State<LoginLockScreen> {
                     ),
                     const SizedBox(height: 14),
                   ],
-                  TextField(
-                    controller: _emailController,
-                    keyboardType: TextInputType.emailAddress,
-                    decoration: InputDecoration(
-                      labelText: 'E-Posta Adresi',
-                      prefixIcon: const Icon(Icons.email_outlined),
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(14),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
+
+                  // Parola Alanı (Her Zaman Gösterilir)
                   TextField(
                     controller: _passwordController,
                     obscureText: true,
+                    onSubmitted: (_) => _submitAuthForm(),
                     decoration: InputDecoration(
                       labelText: 'Parola',
                       prefixIcon: const Icon(Icons.lock_outline_rounded),
@@ -262,7 +473,35 @@ class _LoginLockScreenState extends State<LoginLockScreen> {
                       ),
                     ),
                   ),
-                  const SizedBox(height: 22),
+
+                  // Beni Hatırla Seçeneği
+                  if (!_isRememberedUserMode) ...[
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Checkbox(
+                          value: _rememberMe,
+                          activeColor: const Color(0xFF0EA5E9),
+                          onChanged: (val) {
+                            setState(() => _rememberMe = val ?? true);
+                          },
+                        ),
+                        GestureDetector(
+                          onTap: () =>
+                              setState(() => _rememberMe = !_rememberMe),
+                          child: const Text(
+                            'Beni Hatırla (Bir sonraki girişte sadece parola sor)',
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              color: Colors.white70,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+
+                  const SizedBox(height: 18),
                   SizedBox(
                     width: double.infinity,
                     height: 50,
@@ -283,50 +522,62 @@ class _LoginLockScreenState extends State<LoginLockScreen> {
                                 color: Colors.white,
                               ),
                             )
-                          : Icon(_isRegisterMode ? Icons.person_add_rounded : Icons.login_rounded),
+                          : Icon(
+                              _isRegisterMode && !_isRememberedUserMode
+                                  ? Icons.person_add_rounded
+                                  : Icons.login_rounded,
+                            ),
                       label: Text(
-                        _isRegisterMode ? 'Hesap Oluştur' : 'Giriş Yap',
-                        style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                  ),
-                  if (_hasSavedToken) ...[
-                    const SizedBox(height: 12),
-                    SizedBox(
-                      width: double.infinity,
-                      height: 46,
-                      child: OutlinedButton.icon(
-                        onPressed: _unlockWithBiometrics,
-                        style: OutlinedButton.styleFrom(
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14),
-                          ),
+                        _isRegisterMode && !_isRememberedUserMode
+                            ? 'Hesap Oluştur'
+                            : 'Giriş Yap',
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
                         ),
-                        icon: const Icon(Icons.fingerprint_rounded, size: 22),
-                        label: const Text('Biyometrik / PIN ile Aç'),
                       ),
                     ),
-                  ],
-                  const SizedBox(height: 12),
-                  TextButton(
-                    onPressed: () {
-                      setState(() {
-                        _isRegisterMode = !_isRegisterMode;
-                        _errorMessage = null;
-                      });
-                    },
-                    child: Text(
-                      _isRegisterMode
-                          ? 'Zaten hesabınız var mı? Giriş Yapın'
-                          : 'Yeni hesap oluşturmak için tıklayın',
-                    ),
                   ),
+                  const SizedBox(height: 12),
+
+                  if (_isRememberedUserMode)
+                    TextButton.icon(
+                      onPressed: _switchAccount,
+                      icon: const Icon(Icons.swap_horiz_rounded, size: 18),
+                      label: const Text('Farklı bir hesapla giriş yap'),
+                    )
+                  else
+                    TextButton(
+                      onPressed: () {
+                        setState(() {
+                          _isRegisterMode = !_isRegisterMode;
+                          _errorMessage = null;
+                        });
+                      },
+                      child: Text(
+                        _isRegisterMode
+                            ? 'Zaten hesabınız var mı? Giriş Yapın'
+                            : 'Yeni hesap oluşturmak için tıklayın',
+                      ),
+                    ),
+
                   TextButton.icon(
-                    onPressed: _showServerConfigDialog,
-                    icon: const Icon(Icons.dns_outlined, size: 15),
+                    onPressed: _showServerSwitcherSheet,
+                    icon: Icon(
+                      widget.apiService.isServerReachable
+                          ? Icons.check_circle_rounded
+                          : Icons.settings_ethernet_rounded,
+                      size: 16,
+                      color: widget.apiService.isServerReachable
+                          ? const Color(0xFF34D399)
+                          : Colors.amberAccent,
+                    ),
                     label: Text(
                       'Sunucu: ${widget.apiService.baseUrl}',
-                      style: const TextStyle(fontSize: 12, color: Colors.white54),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.white70,
+                      ),
                     ),
                   ),
                 ],

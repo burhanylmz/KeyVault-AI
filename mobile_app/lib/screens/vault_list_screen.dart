@@ -151,8 +151,9 @@ class _VaultListScreenState extends State<VaultListScreen> {
                           final item = _keys[index];
                           return _ModernKeyCard(
                             item: item,
-                            onTap: () {
-                              Navigator.of(context).push(
+                            onTap: () async {
+                              final deleted =
+                                  await Navigator.of(context).push<bool>(
                                 MaterialPageRoute(
                                   builder: (_) => KeyDetailExportScreen(
                                     item: item,
@@ -161,6 +162,9 @@ class _VaultListScreenState extends State<VaultListScreen> {
                                   ),
                                 ),
                               );
+                              if (deleted == true) {
+                                await _loadVaultItems();
+                              }
                             },
                           );
                         },

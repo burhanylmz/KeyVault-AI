@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../services/api_service.dart';
 import '../services/auth_storage.dart';
 import 'camera_scan_screen.dart';
+import 'key_detail_export_screen.dart';
 import 'login_lock_screen.dart';
 import 'vault_list_screen.dart';
 
@@ -21,7 +22,9 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  String _userName = '';
   String _userEmail = '';
+  List<KeyVaultItem> _recentKeys = [];
   int _keyCount = 0;
   bool _loadingStats = true;
 
@@ -32,15 +35,20 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _loadDashboardData() async {
+    final fullName = await widget.authStorage.getUserFullName();
     final email = await widget.authStorage.getUserEmail();
-    if (mounted && email != null) {
-      setState(() => _userEmail = email);
+    if (mounted) {
+      setState(() {
+        _userName = (fullName ?? '').trim();
+        _userEmail = (email ?? '').trim();
+      });
     }
     try {
       final keys = await widget.apiService.fetchMyVault();
       if (mounted) {
         setState(() {
           _keyCount = keys.length;
+          _recentKeys = keys.take(3).toList();
           _loadingStats = false;
         });
       }
@@ -82,6 +90,21 @@ class _HomeScreenState extends State<HomeScreen> {
     await _loadDashboardData();
   }
 
+  Future<void> _openKeyDetail(KeyVaultItem item) async {
+    final deleted = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => KeyDetailExportScreen(
+          item: item,
+          apiService: widget.apiService,
+          authStorage: widget.authStorage,
+        ),
+      ),
+    );
+    if (deleted == true) {
+      await _loadDashboardData();
+    }
+  }
+
   Future<void> _logout() async {
     await widget.authStorage.clearSession();
     if (mounted) {
@@ -98,6 +121,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final greetingTitle = _userName.isNotEmpty
+        ? 'Hoş Geldin, $_userName'
+        : 'KeyVault';
+
     return Scaffold(
       body: SafeArea(
         child: RefreshIndicator(
@@ -112,32 +139,39 @@ class _HomeScreenState extends State<HomeScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text(
-                          'KeyVault',
-                          style: TextStyle(
-                            fontSize: 28,
-                            fontWeight: FontWeight.w800,
-                            letterSpacing: -0.5,
-                            color: Colors.white,
-                          ),
-                        ),
-                        if (_userEmail.isNotEmpty)
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
                           Text(
-                            _userEmail,
+                            greetingTitle,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 24,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: -0.5,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            _userEmail.isNotEmpty
+                                ? _userEmail
+                                : 'Dijital Anahtar Kasanız Hazır',
                             style: const TextStyle(
                               fontSize: 13,
                               color: Colors.white60,
                             ),
                           ),
-                      ],
+                        ],
+                      ),
                     ),
+                    const SizedBox(width: 12),
                     IconButton.filledTonal(
                       onPressed: _logout,
-                      icon: const Icon(Icons.logout_rounded),
-                      tooltip: 'Çıkış Yap',
+                      icon: const Icon(Icons.lock_outline_rounded),
+                      tooltip: 'Kasayı Kilitle / Çıkış Yap',
                       style: IconButton.styleFrom(
                         backgroundColor: const Color(0xFF1E293B),
                         foregroundColor: Colors.white70,
@@ -145,7 +179,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 22),
 
                 // Özet Durum Kartı
                 Container(
@@ -210,7 +244,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     ],
                   ),
                 ),
-                const SizedBox(height: 28),
+                const SizedBox(height: 26),
 
                 const Text(
                   'Hızlı İşlemler',
@@ -225,7 +259,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 // Anahtar Ekle Kartı
                 _MenuActionCard(
                   title: 'Anahtar Ekle',
-                  subtitle: 'Kamerayla anahtarınızı tarayın ve dijital kasanıza kaydedin',
+                  subtitle:
+                      'Fotoğraf çekin, kredi kartı referanslı diş analizini inceleyip onaylayın',
                   icon: Icons.add_a_photo_rounded,
                   accentColor: const Color(0xFF38BDF8),
                   onTap: _openAddKey,
@@ -235,12 +270,90 @@ class _HomeScreenState extends State<HomeScreen> {
                 // Dijital Kasam Kartı
                 _MenuActionCard(
                   title: 'Dijital Kasam',
-                  subtitle: 'Kayıtlı anahtarlarınızı görüntüleyin, CNC veya PDF olarak indirin',
+                  subtitle:
+                      'Kayıtlı anahtarlarınızı görüntüleyin, CNC (.gcode) veya PDF olarak indirin',
                   icon: Icons.vpn_key_rounded,
                   accentColor: const Color(0xFF34D399),
                   badgeText: _loadingStats ? null : '$_keyCount',
                   onTap: _openVault,
                 ),
+
+                if (_recentKeys.isNotEmpty) ...[
+                  const SizedBox(height: 28),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'Son Eklenen Anahtarlar',
+                        style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: _openVault,
+                        child: const Text(
+                          'Tümünü Gör',
+                          style: TextStyle(
+                            color: Color(0xFF38BDF8),
+                            fontSize: 13,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  ..._recentKeys.map(
+                    (item) => Container(
+                      margin: const EdgeInsets.only(bottom: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1E293B),
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: Colors.white.withOpacity(0.06),
+                        ),
+                      ),
+                      child: ListTile(
+                        onTap: () => _openKeyDetail(item),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        leading: Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF38BDF8).withOpacity(0.14),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: const Icon(
+                            Icons.vpn_key_rounded,
+                            color: Color(0xFF38BDF8),
+                            size: 20,
+                          ),
+                        ),
+                        title: Text(
+                          item.keyName,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 15,
+                          ),
+                        ),
+                        subtitle: Text(
+                          'Marka/Profil: ${item.profileType} • ${item.rawDepthsMm.length} Diş',
+                          style: const TextStyle(
+                            color: Colors.white60,
+                            fontSize: 12,
+                          ),
+                        ),
+                        trailing: const Icon(
+                          Icons.chevron_right_rounded,
+                          color: Colors.white38,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),

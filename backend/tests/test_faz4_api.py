@@ -143,3 +143,40 @@ def test_faz4_end_to_end_api_workflow(api_client: TestClient):
     )
     assert dimple_resp.status_code == 422
 
+    # 9. İki Aşamalı Önizleme (analyze-preview) -> Onayla ve Kaydet (confirm-save) -> Sil (DELETE)
+    preview_resp = api_client.post(
+        "/api/keys/analyze-preview",
+        headers=auth_headers,
+        data={"key_name": "Atolye Anahtari", "profile_type": "AUTO"},
+        files={"file": ("preview_key.png", io.BytesIO(synthetic_png_bytes), "image/png")},
+    )
+    assert preview_resp.status_code == 200, preview_resp.text
+    preview_data = preview_resp.json()
+    assert preview_data["annotated_photo_b64"] is not None
+    assert preview_data["vector_drawing_b64"] is not None
+    assert len(preview_data["raw_depths_mm"]) == 5
+
+    confirm_resp = api_client.post(
+        "/api/keys/confirm-save",
+        headers=auth_headers,
+        json={
+            "key_name": preview_data["key_name"],
+            "profile_type": preview_data["profile_type"],
+            "mode": preview_data["mode"],
+            "scale_factor_k": preview_data["scale_factor_k"],
+            "valley_positions_mm": preview_data["valley_positions_mm"],
+            "raw_depths_mm": preview_data["raw_depths_mm"],
+            "bitting_code": preview_data["bitting_code"],
+            "macs_valid": preview_data["macs_valid"],
+            "macs_state": preview_data["macs_state"],
+            "vector_drawing_b64": preview_data["vector_drawing_b64"],
+        },
+    )
+    assert confirm_resp.status_code == 201, confirm_resp.text
+    confirmed_key = confirm_resp.json()
+    confirmed_id = confirmed_key["id"]
+
+    del_resp = api_client.delete(f"/api/keys/{confirmed_id}", headers=auth_headers)
+    assert del_resp.status_code == 204
+
+

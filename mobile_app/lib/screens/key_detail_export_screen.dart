@@ -26,25 +26,11 @@ class KeyDetailExportScreen extends StatefulWidget {
 
 class _KeyDetailExportScreenState extends State<KeyDetailExportScreen> {
   bool _isExporting = false;
-
-  Future<bool> _verifyBiometricBeforeExport() async {
-    final available = await widget.authStorage.isBiometricAvailable();
-    if (!available) {
-      return true;
-    }
-    return await widget.authStorage.authenticateWithBiometrics(
-      reason: 'CNC kesim dosyasını veya PDF kartını indirmek için kimliğinizi doğrulayın',
-    );
-  }
+  bool _isDeleting = false;
 
   Future<void> _exportAndShareGCode() async {
     setState(() => _isExporting = true);
     try {
-      final authorized = await _verifyBiometricBeforeExport();
-      if (!authorized) {
-        throw Exception('Kimlik doğrulama reddedildi.');
-      }
-
       final gcodeText = await widget.apiService.downloadGCode(widget.item.id);
       final tempDir = await getTemporaryDirectory();
       final file = File('${tempDir.path}/keyvault_${widget.item.id}.gcode');
@@ -57,7 +43,10 @@ class _KeyDetailExportScreenState extends State<KeyDetailExportScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.toString()), backgroundColor: Colors.redAccent),
+          SnackBar(
+            content: Text(e.toString().replaceFirst('Exception: ', '')),
+            backgroundColor: Colors.redAccent,
+          ),
         );
       }
     } finally {
@@ -70,11 +59,6 @@ class _KeyDetailExportScreenState extends State<KeyDetailExportScreen> {
   Future<void> _exportAndSharePdfCard() async {
     setState(() => _isExporting = true);
     try {
-      final authorized = await _verifyBiometricBeforeExport();
-      if (!authorized) {
-        throw Exception('Kimlik doğrulama reddedildi.');
-      }
-
       final Uint8List pdfBytes =
           await widget.apiService.downloadCuttingCardPdf(widget.item.id);
       final tempDir = await getTemporaryDirectory();
@@ -89,12 +73,72 @@ class _KeyDetailExportScreenState extends State<KeyDetailExportScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.toString()), backgroundColor: Colors.redAccent),
+          SnackBar(
+            content: Text(e.toString().replaceFirst('Exception: ', '')),
+            backgroundColor: Colors.redAccent,
+          ),
         );
       }
     } finally {
       if (mounted) {
         setState(() => _isExporting = false);
+      }
+    }
+  }
+
+  Future<void> _confirmAndDeleteKey() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E293B),
+        title: const Text(
+          'Anahtarı Sil',
+          style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+        ),
+        content: Text(
+          '"${widget.item.keyName}" anahtarını dijital kasanızdan kalıcı olarak silmek istediğinize emin misiniz?',
+          style: const TextStyle(color: Colors.white70),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Vazgeç'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.redAccent),
+            child: const Text('Sil'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true) return;
+
+    setState(() => _isDeleting = true);
+    try {
+      await widget.apiService.deleteKey(widget.item.id);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${widget.item.keyName} kasadan silindi.'),
+            backgroundColor: const Color(0xFF10B981),
+          ),
+        );
+        Navigator.of(context).pop(true);
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.toString().replaceFirst('Exception: ', '')),
+            backgroundColor: Colors.redAccent,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isDeleting = false);
       }
     }
   }
@@ -116,6 +160,16 @@ class _KeyDetailExportScreenState extends State<KeyDetailExportScreen> {
         title: const Text('Anahtar Detayı'),
         backgroundColor: Colors.transparent,
         elevation: 0,
+        actions: [
+          IconButton(
+            onPressed: _isDeleting ? null : _confirmAndDeleteKey,
+            icon: const Icon(
+              Icons.delete_outline_rounded,
+              color: Colors.redAccent,
+            ),
+            tooltip: 'Anahtarı Sil',
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.fromLTRB(18, 8, 18, 28),
@@ -167,7 +221,7 @@ class _KeyDetailExportScreenState extends State<KeyDetailExportScreen> {
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              'Profil: ${item.profileType}',
+                              'Marka / Profil: ${item.profileType}',
                               style: const TextStyle(
                                 fontSize: 13,
                                 color: Colors.white60,
@@ -192,7 +246,8 @@ class _KeyDetailExportScreenState extends State<KeyDetailExportScreen> {
                         icon: item.macsValid
                             ? Icons.check_circle_rounded
                             : Icons.warning_amber_rounded,
-                        label: item.macsValid ? 'Üretime Uygun' : 'Kesim Uyarısı',
+                        label:
+                            item.macsValid ? 'Üretime Uygun' : 'Kesim Uyarısı',
                         color: item.macsValid
                             ? const Color(0xFF34D399)
                             : Colors.amberAccent,
@@ -288,7 +343,7 @@ class _KeyDetailExportScreenState extends State<KeyDetailExportScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   const Text(
-                    'Diş Derinlik Ölçümleri',
+                    'Diş Derinlik Ölçümleri (Referans: 85.60 mm Kart)',
                     style: TextStyle(
                       fontSize: 15,
                       fontWeight: FontWeight.bold,
@@ -300,6 +355,12 @@ class _KeyDetailExportScreenState extends State<KeyDetailExportScreen> {
                     final xPos = idx < item.valleyPositionsMm.length
                         ? item.valleyPositionsMm[idx]
                         : (4.0 + idx * 4.5);
+                    final dx = idx == 0
+                        ? xPos
+                        : (xPos -
+                            (idx - 1 < item.valleyPositionsMm.length
+                                ? item.valleyPositionsMm[idx - 1]
+                                : (4.0 + (idx - 1) * 4.5)));
                     final depth = item.rawDepthsMm[idx];
                     return Padding(
                       padding: const EdgeInsets.symmetric(vertical: 5.0),
@@ -307,17 +368,17 @@ class _KeyDetailExportScreenState extends State<KeyDetailExportScreen> {
                         mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
                           Text(
-                            'Diş #${idx + 1}',
+                            'Diş #${idx + 1} (D${idx + 1})',
                             style: const TextStyle(
                               color: Colors.white70,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
                           Text(
-                            'Konum: ${xPos.toStringAsFixed(2)} mm   •   Derinlik: ${depth.toStringAsFixed(2)} mm',
+                            'X: ${xPos.toStringAsFixed(2)} mm (ΔX: ${dx.toStringAsFixed(2)})  •  Derinlik: -${depth.toStringAsFixed(2)} mm',
                             style: const TextStyle(
                               color: Colors.white60,
-                              fontSize: 13,
+                              fontSize: 12.5,
                             ),
                           ),
                         ],

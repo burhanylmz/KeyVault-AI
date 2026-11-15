@@ -19,7 +19,11 @@ from app.database import get_db
 from app.models import KeyVault, User
 from app.report_generator import generate_2d_key_vector_base64, generate_cutting_card_pdf
 from app.routers.auth import get_current_user
-from app.schemas import KeyVaultItemResponse
+from app.schemas import (
+    KeyConfirmSaveRequest,
+    KeyPreviewResponse,
+    KeyVaultItemResponse,
+)
 from app.security import decrypt_data, encrypt_data
 from app.vision_pipeline import DimpleKeyHardwareError, analyze_key_image
 
@@ -54,6 +58,156 @@ def _deserialize_vault_item(item: KeyVault) -> KeyVaultItemResponse:
     )
 
 
+@router.post("/analyze-preview", response_model=KeyPreviewResponse)
+async def analyze_key_preview(
+    file: UploadFile = File(...),
+    key_name: str = Form("Ana Giriş Anahtarı"),
+    profile_type: str = Form("AUTO"),
+    current_user: User = Depends(get_current_user),
+) -> KeyPreviewResponse:
+    """
+    Fotoğrafı çekildiği anda RAM'de analiz eder, kredi kartı kalibrasyonunu ve
+    diş derinliklerini fotoğrafın üzerine çizerek (annotated_photo_b64) kullanıcı
+    onayı için önizleme olarak döndürür. Henüz veritabanına kaydetmez.
+    """
+    raw_bytes = await file.read()
+    try:
+        analysis = analyze_key_image(raw_bytes=raw_bytes, profile_type=profile_type)
+    except DimpleKeyHardwareError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    finally:
+        del raw_bytes
+
+    effective_profile: str = analysis.get("profile_type") or profile_type
+    detected_brand: Optional[str] = analysis.get("detected_brand")
+    if detected_brand and key_name.strip() in {
+        "Ana Giriş Anahtarı",
+        "Ana Giris Anahtari",
+        "Yeni Anahtar",
+    }:
+        key_name = f"{detected_brand} Anahtar"
+
+    mode: str = analysis["mode"]
+    bitting_code: Optional[str] = analysis["bitting_code"]
+    raw_depths_mm: List[float] = analysis["raw_depths_mm"]
+    valley_positions_mm: List[float] = analysis["valley_positions_mm"]
+    scale_k: float = analysis["scale_factor_k"]
+    card_px_w: float = analysis["card_pixel_width"]
+    annotated_photo_b64: Optional[str] = analysis.get("annotated_photo_b64")
+
+    dfa = MACS_DFA()
+    if bitting_code:
+        macs_valid = dfa.validate(bitting_code)
+        macs_state = dfa.current_state
+    else:
+        macs_valid = dfa.validate_raw_depths(raw_depths_mm)
+        macs_state = dfa.current_state
+
+    vector_b64 = generate_2d_key_vector_base64(
+        raw_depths_mm=raw_depths_mm,
+        bitting_code=bitting_code,
+        profile_type=effective_profile,
+        valley_positions_mm=valley_positions_mm,
+        profile_outline_mm=analysis.get("profile_outline_mm"),
+        blade_width_mm=analysis.get("blade_width_mm"),
+        blade_length_mm=analysis.get("blade_length_mm"),
+        total_length_mm=analysis.get("total_length_mm"),
+        bow_height_mm=analysis.get("bow_height_mm"),
+    )
+
+    return KeyPreviewResponse(
+        key_name=key_name,
+        profile_type=effective_profile,
+        detected_brand=detected_brand,
+        mode=mode,
+        bitting_code=bitting_code,
+        raw_depths_mm=raw_depths_mm,
+        valley_positions_mm=valley_positions_mm,
+        remaining_heights_mm=analysis.get("remaining_heights_mm", []),
+        pitch_values_mm=analysis.get("pitch_values_mm", []),
+        total_length_mm=analysis.get("total_length_mm", 0.0),
+        bow_height_mm=analysis.get("bow_height_mm", 0.0),
+        blade_length_mm=analysis.get("blade_length_mm", 0.0),
+        blade_width_mm=analysis.get("blade_width_mm", 0.0),
+        macs_valid=macs_valid,
+        macs_state=macs_state,
+        scale_factor_k=scale_k,
+        card_pixel_width=card_px_w,
+        vector_drawing_b64=vector_b64,
+        annotated_photo_b64=annotated_photo_b64,
+    )
+
+
+@router.post("/confirm-save", response_model=KeyVaultItemResponse, status_code=status.HTTP_201_CREATED)
+def confirm_and_save_key(
+    payload: KeyConfirmSaveRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> KeyVaultItemResponse:
+    """Kullanıcının önizleme ekranında onayladığı anahtar analizini AES-256 ile şifreleyip kasaya kaydeder."""
+    vector_b64 = payload.vector_drawing_b64 or generate_2d_key_vector_base64(
+        raw_depths_mm=payload.raw_depths_mm,
+        bitting_code=payload.bitting_code,
+        profile_type=payload.profile_type,
+        valley_positions_mm=payload.valley_positions_mm,
+    )
+
+    encrypted_bitting = encrypt_data(
+        payload.bitting_code if payload.bitting_code else "RAW_MODE"
+    )
+    encrypted_depths = encrypt_data(json.dumps(payload.raw_depths_mm))
+    encrypted_positions = encrypt_data(json.dumps(payload.valley_positions_mm))
+
+    vault_record = KeyVault(
+        user_id=current_user.id,
+        key_name=payload.key_name.strip() or "Yeni Anahtar",
+        profile_type=payload.profile_type.strip() or "STANDART-5P",
+        mode=payload.mode,
+        encrypted_bitting=encrypted_bitting,
+        encrypted_depths=encrypted_depths,
+        encrypted_positions=encrypted_positions,
+        macs_valid=payload.macs_valid,
+        macs_state=payload.macs_state,
+        scale_factor_k=payload.scale_factor_k,
+        vector_drawing_b64=vector_b64,
+    )
+    db.add(vault_record)
+    db.commit()
+    db.refresh(vault_record)
+
+    return _deserialize_vault_item(vault_record)
+
+
+@router.delete("/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_vault_key(
+    key_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Seçilen anahtarı kullanıcının dijital kasasından siler."""
+    record = (
+        db.query(KeyVault)
+        .filter(KeyVault.id == key_id, KeyVault.user_id == current_user.id)
+        .first()
+    )
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Anahtar kaydı bulunamadı.",
+        )
+    db.delete(record)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/scan-and-save", response_model=KeyVaultItemResponse, status_code=status.HTTP_201_CREATED)
 async def scan_and_save_key(
     file: UploadFile = File(...),
@@ -83,6 +237,14 @@ async def scan_and_save_key(
     finally:
         del raw_bytes
 
+    effective_profile: str = analysis.get("profile_type") or profile_type
+    detected_brand: Optional[str] = analysis.get("detected_brand")
+    if detected_brand and key_name.strip() in {
+        "Ana Giriş Anahtarı",
+        "Ana Giris Anahtari",
+        "Yeni Anahtar",
+    }:
+        key_name = f"{detected_brand} Anahtar"
     mode: str = analysis["mode"]
     bitting_code: Optional[str] = analysis["bitting_code"]
     raw_depths_mm: List[float] = analysis["raw_depths_mm"]
@@ -93,7 +255,7 @@ async def scan_and_save_key(
     if bitting_code:
         macs_valid = dfa.validate(bitting_code)
         macs_state = dfa.current_state
-        if not macs_valid:
+        if not macs_valid and profile_type.strip().upper() in {"YALE-5", "YALE-6"}:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"MACS DFA Üretim Reddi ({macs_state}): {dfa.violation_detail}",
@@ -105,7 +267,7 @@ async def scan_and_save_key(
     vector_b64 = generate_2d_key_vector_base64(
         raw_depths_mm=raw_depths_mm,
         bitting_code=bitting_code,
-        profile_type=profile_type,
+        profile_type=effective_profile,
         valley_positions_mm=valley_positions_mm,
     )
 
@@ -116,7 +278,7 @@ async def scan_and_save_key(
     vault_record = KeyVault(
         user_id=current_user.id,
         key_name=key_name,
-        profile_type=profile_type,
+        profile_type=effective_profile,
         mode=mode,
         encrypted_bitting=encrypted_bitting,
         encrypted_depths=encrypted_depths,
